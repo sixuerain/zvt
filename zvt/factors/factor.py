@@ -1,191 +1,267 @@
 # -*- coding: utf-8 -*-
+import enum
 import logging
+from typing import List, Union
 
 import pandas as pd
+import plotly.graph_objs as go
 
-from zvt.api.common import get_data
-from zvt.domain import SecurityType
+from zvt.charts import Chart
+from zvt.domain import SecurityType, TradingLevel, Provider
+from zvt.reader.reader import DataReader, DataListener
 from zvt.utils.pd_utils import index_df_with_security_time
-from zvt.utils.time_utils import now_pd_timestamp, to_pd_timestamp
 
 
-class Factor(object):
-    logger = logging.getLogger(__name__)
-    df: pd.DataFrame = None
+class FactorType(enum.Enum):
+    filter = 'filter'
+    score = 'score'
+    state = 'state'
 
-    def __init__(self, security_type=SecurityType.stock, exchanges=['sh', 'sz'], codes=None,
-                 the_timestamp=now_pd_timestamp(),
-                 window=None,
-                 window_func='mean',
-                 start_timestamp=None,
-                 end_timestamp=None) -> None:
-        """
 
-        :param security_type:
-        :type security_type:
-        :param exchanges:
-        :type exchanges:
-        :param codes:
-        :type codes:
-        :param the_timestamp:the specific timestamp for the factor
-        :type the_timestamp:
-        :param window: time window for the factor
-        :type window: pd.DateOffset
-        :param start_timestamp:
-        :type start_timestamp:
-        :param end_timestamp:
-        :type end_timestamp:
-        """
-        if the_timestamp:
-            self.the_timestamp = to_pd_timestamp(the_timestamp)
-            self.start_timestamp = self.the_timestamp
-            self.end_timestamp = self.the_timestamp
-        elif start_timestamp and end_timestamp:
-            self.start_timestamp = to_pd_timestamp(start_timestamp)
-            self.end_timestamp = to_pd_timestamp(end_timestamp)
+class Factor(DataReader, DataListener):
+    factor_type: FactorType = None
 
-        self.window = window
-        self.window_func = window_func
+    def __init__(self,
+                 data_schema: object,
+                 security_list: List[str] = None,
+                 security_type: Union[str, SecurityType] = SecurityType.stock,
+                 exchanges: List[str] = ['sh', 'sz'],
+                 codes: List[str] = None,
+                 the_timestamp: Union[str, pd.Timestamp] = None,
+                 start_timestamp: Union[str, pd.Timestamp] = None,
+                 end_timestamp: Union[str, pd.Timestamp] = None,
+                 columns: List = None,
+                 filters: List = None,
+                 provider: Union[str, Provider] = 'eastmoney',
+                 level: TradingLevel = TradingLevel.LEVEL_1DAY,
+                 real_time: bool = False,
+                 refresh_interval: int = 10,
+                 category_field: str = 'security_id',
+                 # child added arguments
+                 keep_all_timestamp: bool = False,
+                 fill_method: str = 'ffill',
+                 effective_number: int = 10) -> None:
+        super().__init__(data_schema, security_list, security_type, exchanges, codes, the_timestamp, start_timestamp,
+                         end_timestamp, columns, filters, provider, level, real_time, refresh_interval, category_field)
 
-        if self.window:
-            self.fetch_start_timestamp = self.start_timestamp - self.window
-        else:
-            self.fetch_start_timestamp = self.start_timestamp
+        self.factor_name = type(self).__name__.lower()
 
-        self.security_type = security_type
-        self.exchanges = exchanges
-        self.codes = codes
+        if columns:
+            self.factors = [item.key for item in columns]
 
-    def run(self):
+        self.keep_all_timestamp = keep_all_timestamp
+        self.fill_method = fill_method
+        self.effective_number = effective_number
+
+        self.depth_df: pd.DataFrame = None
+        self.result_df: pd.DataFrame = None
+
+        self.register_data_listener(self)
+
+    def depth_computing(self):
+        self.logger.info('do nothing for depth_computing')
+
+    def breadth_computing(self):
+        self.logger.info('do nothing for breadth_computing')
+
+    def compute(self):
         """
         implement this to calculate factors normalize to [0,1]
 
         """
-        raise NotImplementedError
+
+        self.depth_computing()
+        self.breadth_computing()
 
     def __repr__(self) -> str:
-        return self.df.__repr__()
+        return self.result_df.__repr__()
+
+    def get_result_df(self):
+        return self.result_df
+
+    def get_depth_df(self):
+        return self.depth_df
+
+    def draw_depth(self, figure=go.Scatter, mode='lines', value_field='close', render='html', file_name=None,
+                   width=None, height=None, title=None, keep_ui_state=True):
+        chart = Chart(category_field=self.category_field, figures=figure, modes=mode, value_fields=value_field,
+                      render=render, file_name=file_name,
+                      width=width, height=height, title=title, keep_ui_state=keep_ui_state)
+        chart.set_data_df(self.depth_df)
+        chart.draw()
+
+    def draw_result(self, figure=go.Scatter, mode='lines', value_field='close', render='html', file_name=None,
+                    width=None, height=None, title=None, keep_ui_state=True):
+        chart = Chart(category_field=self.category_field, figures=figure, modes=mode, value_fields=value_field,
+                      render=render, file_name=file_name,
+                      width=width, height=height, title=title, keep_ui_state=keep_ui_state)
+        chart.set_data_df(self.result_df)
+        chart.draw()
+
+    def fill_gap(self):
+        if self.keep_all_timestamp:
+            idx = pd.date_range(self.start_timestamp, self.end_timestamp)
+            new_index = pd.MultiIndex.from_product([self.result_df.index.levels[0], idx],
+                                                   names=['security_id', 'timestamp'])
+            self.result_df = self.result_df.loc[~self.result_df.index.duplicated(keep='first')]
+            self.result_df = self.result_df.reindex(new_index)
+            self.result_df = self.result_df.fillna(method=self.fill_method, limit=self.effective_number)
+
+    def on_data_loaded(self, data: pd.DataFrame):
+        self.compute()
+
+    def on_data_changed(self, data: pd.DataFrame):
+        """
+        overwrite it for computing fast
+
+        Parameters
+        ----------
+        data :
+        """
+        self.compute()
+
+    def on_category_data_added(self, category, added_data: pd.DataFrame):
+        """
+        overwrite it for computing fast
+
+        Parameters
+        ----------
+        category :
+        added_data :
+        """
+        self.compute()
 
 
-class MustFactor(Factor):
-    pass
+class FilterFactor(Factor):
+    factor_type = FactorType.filter
 
 
 class ScoreFactor(Factor):
-    pass
+    factor_type = FactorType.score
+
+    def __init__(self, data_schema: object,
+                 security_list: List[str] = None,
+                 security_type: Union[str, SecurityType] = SecurityType.stock,
+                 exchanges: List[str] = ['sh', 'sz'],
+                 codes: List[str] = None,
+                 the_timestamp: Union[str, pd.Timestamp] = None,
+                 start_timestamp: Union[str, pd.Timestamp] = None,
+                 end_timestamp: Union[str, pd.Timestamp] = None,
+                 columns: List = None, filters: List = None,
+                 provider: Union[str, Provider] = 'eastmoney',
+                 level: TradingLevel = TradingLevel.LEVEL_1DAY,
+                 real_time: bool = False, refresh_interval: int = 10,
+                 category_field: str = 'security_id',
+                 keep_all_timestamp: bool = False,
+                 fill_method: str = 'ffill',
+                 effective_number: int = 10,
+                 # child added arguments
+                 depth_computing_method='ma',
+                 depth_computing_param={'window': '100D', 'on': 'timestamp'},
+                 breadth_computing_method='quantile',
+                 breadth_computing_param={'score_levels': [0.1, 0.3, 0.5, 0.7, 0.9]}) -> None:
+        self.depth_computing_method = depth_computing_method
+        self.depth_computing_param = depth_computing_param
+
+        self.breadth_computing_method = breadth_computing_method
+        self.breadth_computing_param = breadth_computing_param
+
+        super().__init__(data_schema, security_list, security_type, exchanges, codes, the_timestamp, start_timestamp,
+                         end_timestamp, columns, filters, provider, level, real_time, refresh_interval, category_field,
+                         keep_all_timestamp, fill_method, effective_number)
+
+    def depth_computing(self):
+        self.depth_df = self.data_df.reset_index(level='timestamp')
+
+        if self.depth_computing_method == 'ma':
+            window = self.depth_computing_param['window']
+
+            on = self.depth_computing_param['on']
+
+            if on == 'timestamp':
+                if isinstance(window, pd.DateOffset):
+                    window = '{}D'.format(self.window.days)
+
+                self.depth_df = self.depth_df.groupby(level=0).rolling(window=window,
+                                                                       on='timestamp').mean()
+            else:
+                assert type(window) == int
+                self.depth_df = self.depth_df.groupby(level=0).rolling(window=window).mean()
+        elif self.depth_computing_method == 'count':
+            window = self.depth_computing_param['window']
+            if isinstance(window, pd.DateOffset):
+                window = '{}D'.format(self.window.days)
+
+            self.depth_df = self.depth_df.groupby(level=0).rolling(window=window, on='timestamp').count()
+
+        self.depth_df = self.depth_df.reset_index(level=0, drop=True)
+        self.depth_df = self.depth_df.set_index('timestamp', append=True)
+
+        self.depth_df = self.depth_df.loc[(slice(None), slice(self.start_timestamp, self.end_timestamp)), :]
+
+        self.logger.info('factor:{},depth_df:\n{}'.format(self.factor_name, self.depth_df))
+
+    def breadth_computing(self):
+        if self.breadth_computing_method == 'quantile':
+            self.score_levels = self.breadth_computing_param['score_levels']
+            self.score_levels.sort(reverse=True)
+
+            self.quantile = self.depth_df.groupby(level=1).quantile(self.score_levels)
+            self.quantile.index.names = ['timestamp', 'score']
+
+            self.logger.info('factor:{},quantile:\n{}'.format(self.factor_name, self.quantile))
+
+            self.result_df = self.depth_df.copy()
+            self.result_df.reset_index(inplace=True, level='security_id')
+            self.result_df['quantile'] = None
+            for timestamp in self.quantile.index.levels[0]:
+                length = len(self.result_df.loc[self.result_df.index == timestamp, 'quantile'])
+                self.result_df.loc[self.result_df.index == timestamp, 'quantile'] = [self.quantile.loc[
+                                                                                         timestamp].to_dict()] * length
+
+            self.logger.info('factor:{},df with quantile:\n{}'.format(self.factor_name, self.result_df))
+
+            # self.result_df = self.result_df.set_index(['security_id'], append=True)
+            # self.result_df = self.result_df.sort_index(level=[0, 1])
+            #
+            # self.logger.info(self.result_df)
+            #
+            def calculate_score(df, factor_name, quantile):
+                original_value = df[factor_name]
+                score_map = quantile.get(factor_name)
+                min_score = self.score_levels[-1]
+
+                if original_value < score_map.get(min_score):
+                    return 0
+
+                for score in self.score_levels[:-1]:
+                    if original_value >= score_map.get(score):
+                        return score
+
+            for factor in self.factors:
+                self.result_df[factor] = self.result_df.apply(lambda x: calculate_score(x, factor, x['quantile']),
+                                                              axis=1)
+
+            self.result_df = self.result_df.reset_index()
+            self.result_df = index_df_with_security_time(self.result_df)
+            self.result_df = self.result_df.loc[:, self.factors]
+
+            self.result_df = self.result_df.loc[~self.result_df.index.duplicated(keep='first')]
+
+            self.logger.info('factor:{},df:\n{}'.format(self.factor_name, self.result_df))
+
+            self.fill_gap()
 
 
-class OneSchemaFactor(Factor):
-    data_schema = None
+class StateFactor(Factor):
+    factor_type = FactorType.state
+    states = []
 
-    def __init__(self, security_type=SecurityType.stock, exchanges=['sh', 'sz'], codes=None, the_timestamp=None,
-                 window=None, window_func='mean', start_timestamp=None, end_timestamp=None, columns=[], filters=None,
-                 provider='eastmoney') -> None:
-        super().__init__(security_type, exchanges, codes, the_timestamp, window, window_func,
-                         start_timestamp, end_timestamp)
+    def get_state(self, timestamp, security_id):
+        pass
 
-        self.columns = set(columns) | {self.data_schema.security_id, self.data_schema.timestamp}
-        self.factors = [item.key for item in columns]
-        self.provider = provider
+    def get_short_state(self):
+        pass
 
-        self.original_df = get_data(data_schema=self.data_schema, provider=self.provider, codes=self.codes,
-                                    columns=self.columns, start_timestamp=self.fetch_start_timestamp,
-                                    end_timestamp=self.end_timestamp, filters=filters)
-
-        self.original_df = index_df_with_security_time(self.original_df)
-
-        self.logger.info(self.original_df)
-
-        if self.window:
-            self.data_df = self.original_df.reset_index(level='timestamp')
-
-            # TODO:better way to handle window function
-            if self.window_func == 'mean':
-                self.data_df = self.data_df.groupby(level=0).rolling(window='{}D'.format(self.window.days),
-                                                                     on='timestamp').mean()
-            elif self.window_func == 'count':
-                self.data_df = self.data_df.groupby(level=0).rolling(window='{}D'.format(self.window.days),
-                                                                     on='timestamp').count()
-            self.data_df = self.data_df.reset_index(level=0, drop=True)
-            self.data_df = self.data_df.set_index('timestamp', append=True)
-            print(self.data_df)
-        else:
-            self.data_df = self.original_df
-
-        self.data_df = self.data_df.loc[(slice(None), slice(self.start_timestamp, self.end_timestamp)), :]
-
-        self.logger.info(self.data_df)
-
-
-class OneSchemaMustFactor(OneSchemaFactor, MustFactor):
-
-    def __init__(self, security_type=SecurityType.stock, exchanges=['sh', 'sz'], codes=None, the_timestamp=None,
-                 window=None, window_func='mean', start_timestamp=None, end_timestamp=None, columns=[], filters=None,
-                 provider='eastmoney') -> None:
-        super().__init__(security_type, exchanges, codes, the_timestamp, window, window_func, start_timestamp,
-                         end_timestamp, columns, filters, provider=provider)
-
-
-class OneSchemaScoreFactor(OneSchemaFactor, ScoreFactor):
-    def __init__(self, security_type=SecurityType.stock, exchanges=['sh', 'sz'], codes=None, the_timestamp=None,
-                 window=None, window_func='mean', start_timestamp=None, end_timestamp=None, columns=[], filters=None,
-                 provider='eastmoney', score_levels=[0.1, 0.3, 0.5, 0.7, 0.9]) -> None:
-        super().__init__(security_type, exchanges, codes, the_timestamp, window, window_func, start_timestamp,
-                         end_timestamp, columns, filters, provider)
-        self.score_levels = score_levels
-        self.score_levels.sort(reverse=True)
-
-    @staticmethod
-    def norm_score(factors, quantile, timestamp, score_levels):
-        for col in factors.index:
-            min_score = score_levels[-1]
-
-            if factors[col] < quantile.loc[timestamp, min_score][col]:
-                factors[col] = 0
-                continue
-
-            for score in score_levels[:-1]:
-                if factors[col] >= quantile.loc[timestamp, score][col]:
-                    factors[col] = score
-                    continue
-
-    def run(self):
-        self.quantile = self.data_df.groupby(level=1).quantile(self.score_levels)
-        self.quantile.index.names = ['timestamp', 'score']
-
-        self.logger.info(self.quantile)
-
-        self.df = self.data_df.copy()
-        self.df.reset_index(inplace=True, level='security_id')
-        self.df['quantile'] = None
-        for timestamp in self.quantile.index.levels[0]:
-            length = len(self.df.loc[self.df.index == timestamp, 'quantile'])
-            self.df.loc[self.df.index == timestamp, 'quantile'] = [self.quantile.loc[timestamp].to_dict()] * length
-
-        self.logger.info(self.df)
-
-        # self.df = self.df.set_index(['security_id'], append=True)
-        # self.df = self.df.sort_index(level=[0, 1])
-        #
-        # self.logger.info(self.df)
-        #
-        def calculate_score(df, factor_name, quantile):
-            original_value = df[factor_name]
-            score_map = quantile.get(factor_name)
-            min_score = self.score_levels[-1]
-
-            if original_value < score_map.get(min_score):
-                return 0
-
-            for score in self.score_levels[:-1]:
-                if original_value >= score_map.get(score):
-                    return score
-
-        for factor in self.factors:
-            self.df[factor] = self.df.apply(lambda x: calculate_score(x, factor, x['quantile']), axis=1)
-
-        self.df = self.df.reset_index()
-        self.df = index_df_with_security_time(self.df)
-        self.df = self.df.loc[:, self.factors]
-
-        self.logger.info(self.df)
+    def get_long_state(self):
+        pass

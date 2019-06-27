@@ -92,7 +92,11 @@ ENV/
 
 /tick
 /full
-#/data/
-/*.zip
+/data/
+/datasample
+data.tar.gz
 /ve/
 .pytest_cache/
+
+zen/
+eastmoney/

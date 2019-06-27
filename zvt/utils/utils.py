@@ -2,7 +2,13 @@
 import logging
 import os
 from decimal import *
+from enum import Enum
 from logging.handlers import RotatingFileHandler
+
+import pandas as pd
+
+from zvt import LOG_PATH
+from zvt.utils.time_utils import to_time_str
 
 getcontext().prec = 16
 
@@ -45,9 +51,11 @@ def to_float(the_str, default=None):
         elif the_str[-1] == '万':
             the_str = the_str[0:-1]
             scale = 10000
-
+        if not the_str:
+            return default
         return float(Decimal(the_str.replace(',', '')) * Decimal(scale))
     except Exception as e:
+        logger.error('the_str:{}'.format(the_str))
         logger.exception(e)
         return default
 
@@ -82,7 +90,7 @@ def fill_domain_from_dict(the_domain, the_dict: dict, the_map: dict):
             the_func = to_float
 
         the_value = the_dict.get(field_in_dict)
-        if the_value:
+        if the_value is not None:
             to_value = the_value
             if to_value in none_values:
                 setattr(the_domain, k, None)
@@ -92,7 +100,7 @@ def fill_domain_from_dict(the_domain, the_dict: dict, the_map: dict):
                 exec('the_domain.{}=result_value'.format(k))
 
 
-def init_process_log(file_name, log_dir=None):
+def init_process_log(file_name, log_dir=LOG_PATH):
     root_logger = logging.getLogger()
 
     # reset the handlers
@@ -119,3 +127,31 @@ def init_process_log(file_name, log_dir=None):
     # add the handlers to the logger
     root_logger.addHandler(fh)
     root_logger.addHandler(ch)
+
+
+SUPPORT_ENCODINGS = ['GB2312', 'GBK', 'GB18030', 'UTF-8']
+
+
+def read_csv(f, encoding, sep=None, na_values=None):
+    encodings = [encoding] + SUPPORT_ENCODINGS
+    for encoding in encodings:
+        try:
+            if sep:
+                return pd.read_csv(f, sep=sep, encoding=encoding, na_values=na_values)
+            else:
+                return pd.read_csv(f, encoding=encoding, na_values=na_values)
+        except UnicodeDecodeError as e:
+            logger.warning('read_csv failed by using encoding:{}'.format(encoding), e)
+            f.seek(0)
+            continue
+    return None
+
+
+def marshal_object_for_ui(object):
+    if isinstance(object, Enum):
+        return object.value
+
+    if isinstance(object, pd.Timestamp):
+        return to_time_str(object)
+
+    return object
